@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+          cache: true
+
+      - name: Compile Windows Resource Manifest
+        run: |
+          go run github.com/akavel/rsrc@latest -manifest manifest.xml -o rsrc.syso
+
+      - name: Build Executable
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -ldflags="-H windowsgui -s -w" -o ExcelMerge.exe .
+
+      - name: Prepare Release Artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $env:GITHUB_REF_NAME
+          } else {
+            "manual-$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          $zipName = "ExcelMerge-$version-windows-amd64.zip"
+          Write-Host "Creating zip package: $zipName"
+
+          $packageDir = "dist_package"
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          Copy-Item -Path "ExcelMerge.exe" -Destination $packageDir
+          if (Test-Path "README.md") {
+            Copy-Item -Path "README.md" -Destination $packageDir
+          }
+
+          Compress-Archive -Path "$packageDir\*" -DestinationPath $zipName -Force
+          Remove-Item -Recurse -Force $packageDir
+
+          Write-Host "Generating SHA256 checksums..."
+          $filesToCheck = @("ExcelMerge.exe", $zipName)
+          $checksumLines = foreach ($file in $filesToCheck) {
+            if (Test-Path $file) {
+              $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLower()
+              "$hash  $file"
+            }
+          }
+          $checksumLines | Set-Content -Path "checksums.txt" -Encoding utf8
+          Get-Content "checksums.txt"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ExcelMerge.exe
+            ExcelMerge-*-windows-amd64.zip
+            checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
