@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
@@ -176,6 +177,137 @@ func TestMerger_Recurse_CSV_And_SheetFilter(t *testing.T) {
 	// 预期行数：1 行表头 + CSV 2 行 + 订单 1 行 = 4 行
 	if len(rows) != 4 {
 		t.Fatalf("预期 4 行数据，实际: %d 行", len(rows))
+	}
+}
+
+func TestExampleXlsDetectionAndRead(t *testing.T) {
+	examplePath := filepath.Join("..", "..", "example.xls")
+	if _, err := os.Stat(examplePath); err != nil {
+		t.Skip("example.xls 不存在，跳过测试")
+	}
+
+	// 1. 验证格式嗅探
+	format, err := detectFileFormat(examplePath)
+	if err != nil {
+		t.Fatalf("detectFileFormat 报错: %v", err)
+	}
+	if format != FormatCSV {
+		t.Errorf("预期 example.xls 被识别为 FormatCSV (%d)，实际为: %d", FormatCSV, format)
+	}
+
+	// 2. 验证 TableReader 创建与读取
+	reader, err := NewTableReader(examplePath)
+	if err != nil {
+		t.Fatalf("创建 TableReader 失败: %v", err)
+	}
+	defer reader.Close()
+
+	sheets, err := reader.GetSheets()
+	if err != nil {
+		t.Fatalf("GetSheets 失败: %v", err)
+	}
+	if len(sheets) == 0 {
+		t.Fatalf("工作表列表为空")
+	}
+
+	rows, err := reader.ReadSheet(sheets[0])
+	if err != nil {
+		t.Fatalf("ReadSheet 失败: %v", err)
+	}
+
+	if len(rows) < 10 {
+		t.Fatalf("预期读取行数 >= 10，实际读取到 %d 行", len(rows))
+	}
+
+	// 3. 校验列数与中文内容（制表符切分与 GBK 转码校验）
+	header := rows[0]
+	if len(header) < 20 {
+		t.Fatalf("预期字段数 >= 20，实际只有 %d 列，可能制表符未正确切分: %v", len(header), header)
+	}
+
+	if header[0] != "ShopToutID" || header[4] != "Goods_No" {
+		t.Errorf("表头字段不符合预期: %v", header)
+	}
+
+	// 校验数据行包含中文正确解码（例如第 1 行包含 "连衣裙" 或 "金台绣"）
+	foundChinese := false
+	for _, row := range rows {
+		for _, cell := range row {
+			if strings.Contains(cell, "连衣裙") || strings.Contains(cell, "金台绣") || strings.Contains(cell, "女上衣") {
+				foundChinese = true
+				break
+			}
+		}
+		if foundChinese {
+			break
+		}
+	}
+	if !foundChinese {
+		t.Errorf("未在解析结果中找到正确解码的中文字符（可能 GBK 转码失败）")
+	}
+}
+
+func TestMergerWithDisguisedXls(t *testing.T) {
+	examplePath := filepath.Join("..", "..", "example.xls")
+	if _, err := os.Stat(examplePath); err != nil {
+		t.Skip("example.xls 不存在，跳过测试")
+	}
+
+	tempDir, err := os.MkdirTemp("", "merger_disguised_test_*")
+	if err != nil {
+		t.Fatalf("创建临时目录失败: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// 复制一份 example.xls 到临时目录
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatalf("读取 example.xls 失败: %v", err)
+	}
+	destXls := filepath.Join(tempDir, "test_disguised.xls")
+	if err := os.WriteFile(destXls, data, 0644); err != nil {
+		t.Fatalf("写入测试伪装文件失败: %v", err)
+	}
+
+	outPath := filepath.Join(tempDir, "output.xlsx")
+	m := NewDefaultMerger()
+	cfg := MergeConfig{
+		InputDir:         tempDir,
+		OutputPath:       outPath,
+		HeaderRows:       1,
+		SheetFilter:      SheetFilterFirst,
+		AddSourceColumns: true,
+	}
+
+	cb := &dummyCallback{}
+	res, err := m.Run(context.Background(), cfg, cb)
+	if err != nil {
+		t.Fatalf("合并执行失败: %v", err)
+	}
+
+	if res.MergedSheets != 1 {
+		t.Errorf("预期合并 1 个工作表，实际: %d", res.MergedSheets)
+	}
+
+	outF, err := excelize.OpenFile(outPath)
+	if err != nil {
+		t.Fatalf("打开输出失败: %v", err)
+	}
+	defer outF.Close()
+
+	rows, err := outF.GetRows("合并结果")
+	if err != nil {
+		t.Fatalf("读取合并结果失败: %v", err)
+	}
+
+	if len(rows) < 10 {
+		t.Fatalf("预期合并输出行数 >= 10，实际: %d", len(rows))
+	}
+
+	// 来源列检查
+	header := rows[0]
+	if header[0] != "来源文件" || header[1] != "来源工作表" || header[2] != "ShopToutID" {
+		t.Errorf("合并表头异常: %v", header)
 	}
 }
 
