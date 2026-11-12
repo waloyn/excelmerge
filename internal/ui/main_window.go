@@ -27,6 +27,8 @@ type AppUI struct {
 
 	// 合并规则控件
 	headerSpin    *walk.NumberEdit
+	rbSingleSheet *walk.RadioButton
+	rbPerFileSheet *walk.RadioButton
 	rbFirstSheet  *walk.RadioButton
 	rbAllSheets   *walk.RadioButton
 	rbMatchSheets *walk.RadioButton
@@ -135,6 +137,25 @@ func (ui *AppUI) Run() error {
 								Font:     font,
 								Checked:  true,
 							},
+						},
+					},
+					Composite{
+						Layout: HBox{MarginsZero: true, Spacing: 10},
+						Children: []Widget{
+							Label{Text: "输出方式:", Font: font},
+							RadioButton{
+								AssignTo: &ui.rbSingleSheet,
+								Text:     "所有数据合并至单表 (默认)",
+								Font:     font,
+								Value:    0,
+							},
+							RadioButton{
+								AssignTo: &ui.rbPerFileSheet,
+								Text:     "每个文件独立工作表 (多表输出)",
+								Font:     font,
+								Value:    1,
+							},
+							HSpacer{},
 						},
 					},
 					Composite{
@@ -253,7 +274,8 @@ func (ui *AppUI) Run() error {
 		return fmt.Errorf("创建窗口失败: %w", err)
 	}
 
-	// 默认选中“仅首个工作表”
+	// 默认选中“所有数据合并至单表”与“仅首个工作表”
+	ui.rbSingleSheet.SetChecked(true)
 	ui.rbFirstSheet.SetChecked(true)
 
 	// 开启文件/文件夹原生拖拽支持
@@ -360,10 +382,16 @@ func (ui *AppUI) onStartMerge() {
 		}
 	}
 
+	outputMode := merger.OutputModeSingleSheet
+	if ui.rbPerFileSheet.Checked() {
+		outputMode = merger.OutputModePerFileSheet
+	}
+
 	cfg := merger.MergeConfig{
 		InputDir:         inDir,
 		OutputPath:       outPath,
 		HeaderRows:       headerRows,
+		OutputMode:       outputMode,
 		SheetFilter:      filterMode,
 		SheetPatterns:    sheetPatterns,
 		Recurse:          recurse,

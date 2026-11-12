@@ -38,11 +38,22 @@ const (
 	SheetFilterPattern
 )
 
+// OutputMode 输出模式
+type OutputMode int
+
+const (
+	// OutputModeSingleSheet 所有数据合并到单一工作表（默认）
+	OutputModeSingleSheet OutputMode = iota
+	// OutputModePerFileSheet 每个文件独立生成一个工作表
+	OutputModePerFileSheet
+)
+
 // MergeConfig 合并任务配置
 type MergeConfig struct {
 	InputDir         string          // 待合并目录
 	OutputPath       string          // 输出路径（留空则自动生成）
 	HeaderRows       int             // 表头行数，默认 1
+	OutputMode       OutputMode      // 输出工作表模式（单表汇总 / 每文件独立工作表）
 	SheetFilter      SheetFilterMode // 工作表过滤模式
 	SheetPatterns    []string        // 自定义工作表通配符列表（支持逗号分隔）
 	Recurse          bool            // 是否递归子目录

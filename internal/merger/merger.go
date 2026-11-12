@@ -97,16 +97,25 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 
 	const resultSheetName = "合并结果"
 	defaultSheet := outF.GetSheetName(0)
-	if defaultSheet != "" {
-		_ = outF.SetSheetName(defaultSheet, resultSheetName)
-	} else {
-		_, _ = outF.NewSheet(resultSheetName)
+
+	usedSheetNames := make(map[string]bool)
+	var createdSheets []string
+
+	if cfg.OutputMode == OutputModeSingleSheet {
+		if defaultSheet != "" {
+			_ = outF.SetSheetName(defaultSheet, resultSheetName)
+		} else {
+			_, _ = outF.NewSheet(resultSheetName)
+		}
+		usedSheetNames[strings.ToLower(resultSheetName)] = true
 	}
 
-	nextRow := 1
-	headerWritten := false
-	baseCols := 0
+	singleNextRow := 1
+	singleHeaderWritten := false
+	singleBaseCols := 0
+
 	mergedSheets := 0
+	totalRowsWritten := 0
 	srcOffset := 0
 	if cfg.AddSourceColumns {
 		srcOffset = 2
@@ -128,7 +137,7 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 			CurrentFile:  fileName,
 			FileIndex:    fIndex + 1,
 			MergedSheets: mergedSheets,
-			TotalRows:    nextRow - 1,
+			TotalRows:    totalRowsWritten,
 			Duration:     time.Since(startTime),
 		})
 
@@ -145,7 +154,7 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 			continue
 		}
 
-		// 挑选目标工作表
+		// 挑选目标工作表（严格受工作表选择约束）
 		var targetSheets []string
 		for sIdx, sName := range sheetNames {
 			if isSheetSelected(sName, sIdx, &cfg) {
@@ -158,6 +167,12 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 			cbLog(cb, LogLevelWarn, fmt.Sprintf("[%s] 未找到符合条件的工作表，已跳过。全部工作表: %s", fileName, strings.Join(sheetNames, ", ")))
 			continue
 		}
+
+		// 多表输出模式下的每个文件独立控制状态
+		var perFileDestSheet string
+		perFileNextRow := 1
+		perFileHeaderWritten := false
+		perFileBaseCols := 0
 
 		// 处理每个选中的工作表
 		for _, sName := range targetSheets {
@@ -182,9 +197,20 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 
 			totalSheetCols := len(rows[0])
 
+			// 根据模式确定是否已写入表头及跳过行数
+			var currentHeaderWritten bool
+			var currentNextRow int
+			if cfg.OutputMode == OutputModePerFileSheet {
+				currentHeaderWritten = perFileHeaderWritten
+				currentNextRow = perFileNextRow
+			} else {
+				currentHeaderWritten = singleHeaderWritten
+				currentNextRow = singleNextRow
+			}
+
 			// 计算写入计划
 			skipRows := 0
-			if headerWritten {
+			if currentHeaderWritten {
 				skipRows = cfg.HeaderRows
 			}
 			if skipRows >= totalSheetRows {
@@ -192,31 +218,52 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 				continue
 			}
 
-			// 本次写入的数据行数（若首表，包含表头行与后续数据行）
+			// 本次写入的数据行数（若未写入表头，包含表头行与后续数据行）
 			rowsToWrite := totalSheetRows - skipRows
-			if nextRow+rowsToWrite-1 > MaxExcelRows {
+			if currentNextRow+rowsToWrite-1 > MaxExcelRows {
 				_ = reader.Close()
 				return nil, fmt.Errorf("合并后的行数超过 Excel 上限(%d 行)，已在 [%s/%s] 处停止", MaxExcelRows, fileName, sName)
 			}
 
-			// 列数一致性检测
-			if !headerWritten {
-				baseCols = totalSheetCols
-			} else if totalSheetCols != baseCols {
-				cbLog(cb, LogLevelWarn, fmt.Sprintf("[%s/%s] 列数为 %d，与首个表格的 %d 列不一致，请注意核对！", fileName, sName, totalSheetCols, baseCols))
+			// 确定目标 Sheet 并进行列数一致性检测
+			var destSheet string
+			if cfg.OutputMode == OutputModePerFileSheet {
+				if perFileDestSheet == "" {
+					perFileDestSheet = SanitizeSheetName(fileName, usedSheetNames)
+					if len(createdSheets) == 0 && defaultSheet != "" {
+						_ = outF.SetSheetName(defaultSheet, perFileDestSheet)
+					} else {
+						_, _ = outF.NewSheet(perFileDestSheet)
+					}
+					createdSheets = append(createdSheets, perFileDestSheet)
+				}
+				destSheet = perFileDestSheet
+
+				if !perFileHeaderWritten {
+					perFileBaseCols = totalSheetCols
+				} else if totalSheetCols != perFileBaseCols {
+					cbLog(cb, LogLevelWarn, fmt.Sprintf("[%s/%s] 列数为 %d，与该文件首个表格的 %d 列不一致，请注意核对！", fileName, sName, totalSheetCols, perFileBaseCols))
+				}
+			} else {
+				destSheet = resultSheetName
+				if !singleHeaderWritten {
+					singleBaseCols = totalSheetCols
+				} else if totalSheetCols != singleBaseCols {
+					cbLog(cb, LogLevelWarn, fmt.Sprintf("[%s/%s] 列数为 %d，与首个表格的 %d 列不一致，请注意核对！", fileName, sName, totalSheetCols, singleBaseCols))
+				}
 			}
 
 			// 写入行数据
 			for rOffset := 0; rOffset < rowsToWrite; rOffset++ {
 				srcRowIdx := skipRows + rOffset
 				srcRow := rows[srcRowIdx]
-				curDestRow := nextRow + rOffset
+				curDestRow := currentNextRow + rOffset
 
 				// 构造写入行
 				rowVals := make([]interface{}, srcOffset+len(srcRow))
 
 				if cfg.AddSourceColumns {
-					if !headerWritten && srcRowIdx < cfg.HeaderRows {
+					if !currentHeaderWritten && srcRowIdx < cfg.HeaderRows {
 						// 首个表格的表头行
 						if srcRowIdx == cfg.HeaderRows-1 {
 							rowVals[0] = "来源文件"
@@ -238,20 +285,31 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 
 				cellCoord, err := excelize.CoordinatesToCellName(1, curDestRow)
 				if err == nil {
-					_ = outF.SetSheetRow(resultSheetName, cellCoord, &rowVals)
+					_ = outF.SetSheetRow(destSheet, cellCoord, &rowVals)
 				}
 			}
 
-			nextRow += rowsToWrite
-			headerWritten = true
+			if cfg.OutputMode == OutputModePerFileSheet {
+				perFileNextRow += rowsToWrite
+				perFileHeaderWritten = true
+			} else {
+				singleNextRow += rowsToWrite
+				singleHeaderWritten = true
+			}
+
+			totalRowsWritten += rowsToWrite
 			mergedSheets++
-			cbLog(cb, LogLevelInfo, fmt.Sprintf("  + [%s] [%s] 成功合并 %d 行", fileName, sName, rowsToWrite))
+			cbLog(cb, LogLevelInfo, fmt.Sprintf("  + [%s] [%s] -> [%s] 成功写入 %d 行", fileName, sName, destSheet, rowsToWrite))
+		}
+
+		if cfg.OutputMode == OutputModePerFileSheet && perFileDestSheet != "" {
+			adjustColumnWidths(outF, perFileDestSheet, perFileBaseCols+srcOffset)
 		}
 
 		_ = reader.Close()
 	}
 
-	if !headerWritten {
+	if mergedSheets == 0 {
 		cbLog(cb, LogLevelWarn, "未能从任何文件中提取到有效数据，未生成结果文件。")
 		return &MergeResult{
 			OutputPath:   absOutPath,
@@ -262,8 +320,12 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 		}, nil
 	}
 
-	// 7. 适度优化列宽
-	adjustColumnWidths(outF, resultSheetName, baseCols+srcOffset)
+	// 7. 单表模式下调整列宽
+	if cfg.OutputMode == OutputModeSingleSheet {
+		adjustColumnWidths(outF, resultSheetName, singleBaseCols+srcOffset)
+	} else if len(createdSheets) > 0 {
+		outF.SetActiveSheet(0)
+	}
 
 	// 8. 保存输出文件
 	cbLog(cb, LogLevelInfo, fmt.Sprintf("正在保存合并结果至: %s", absOutPath))
@@ -271,7 +333,7 @@ func (m *DefaultMerger) Run(ctx context.Context, cfg MergeConfig, cb ProgressCal
 		return nil, fmt.Errorf("保存结果文件失败: %w", err)
 	}
 
-	totalRows := nextRow - 1
+	totalRows := totalRowsWritten
 	cbLog(cb, LogLevelSuccess, fmt.Sprintf("合并成功！共合并 %d 个工作表，总计 %d 行数据，耗时 %.2f 秒",
 		mergedSheets, totalRows, time.Since(startTime).Seconds()))
 	cbLog(cb, LogLevelSuccess, fmt.Sprintf("输出文件: %s", absOutPath))
@@ -403,5 +465,67 @@ func cbLog(cb ProgressCallback, level LogLevel, msg string) {
 func cbProgress(cb ProgressCallback, stats MergeStats) {
 	if cb != nil {
 		cb.OnProgress(stats)
+	}
+}
+
+// SanitizeSheetName 清洗并规范化 Excel 工作表名称，确保合规且不重复
+func SanitizeSheetName(rawName string, usedLowerNames map[string]bool) string {
+	// 1. 去除扩展名（如果是文件名）
+	name := strings.TrimSuffix(rawName, filepath.Ext(rawName))
+	name = strings.TrimSpace(name)
+
+	// 2. 替换非法字符: \ / ? * [ ] : 为下划线 _
+	invalidChars := []rune{'\\', '/', '?', '*', '[', ']', ':'}
+	rMap := make(map[rune]bool)
+	for _, c := range invalidChars {
+		rMap[c] = true
+	}
+
+	var sb strings.Builder
+	for _, r := range name {
+		if rMap[r] {
+			sb.WriteRune('_')
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	clean := strings.TrimSpace(sb.String())
+	clean = strings.Trim(clean, "'") // 首尾不能有单引号
+
+	if clean == "" {
+		clean = "Sheet"
+	}
+
+	// 截取前 31 个 rune
+	runes := []rune(clean)
+	if len(runes) > 31 {
+		runes = runes[:31]
+	}
+	clean = string(runes)
+
+	// 3. 冲突查重
+	lower := strings.ToLower(clean)
+	if !usedLowerNames[lower] {
+		usedLowerNames[lower] = true
+		return clean
+	}
+
+	// 存在重名，追加递增序号 (2), (3)...
+	counter := 2
+	for {
+		suffix := fmt.Sprintf(" (%d)", counter)
+		suffixRunes := []rune(suffix)
+		maxPrefixLen := 31 - len(suffixRunes)
+		prefixRunes := runes
+		if len(prefixRunes) > maxPrefixLen {
+			prefixRunes = prefixRunes[:maxPrefixLen]
+		}
+		cand := string(prefixRunes) + suffix
+		candLower := strings.ToLower(cand)
+		if !usedLowerNames[candLower] {
+			usedLowerNames[candLower] = true
+			return cand
+		}
+		counter++
 	}
 }
