@@ -61,7 +61,7 @@ func (ui *AppUI) Run() error {
 
 	err := MainWindow{
 		AssignTo: &ui.mainWindow,
-		Title:    "Excel 表格合并工具 v1.0.1 (Win7兼容版)",
+		Title:    "Excel 表格合并工具 v1.0.2 (Win7兼容版)",
 		Font:     font,
 		MinSize:  Size{Width: 640, Height: 600},
 		Size:     Size{Width: 700, Height: 680},
